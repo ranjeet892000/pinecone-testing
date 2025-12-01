@@ -1,0 +1,31 @@
+[project]
+name = "pinecone-testing"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Your Name",email = "you@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13,<4.0"
+dependencies = [
+    "pinecone (>=8.0.0,<9.0.0)",
+    "python-dotenv (>=1.2.1,<2.0.0)",
+    "streamlit (>=1.51.0,<2.0.0)",
+    "pandas (>=2.3.3,<3.0.0)",
+    "boto3 (>=1.41.5,<2.0.0)",
+    "pillow (>=12.0.0,<13.0.0)",
+    "imagehash (>=4.3.2,<5.0.0)",
+    "opencv-python (>=4.12.0.88,<5.0.0.0)",
+    "scikit-image (>=0.25.2,<0.26.0)",
+    "torch (==2.6)",
+    "ultralytics (>=8.3.233,<9.0.0)",
+    "rembg (>=2.0.68,<3.0.0)",
+    "onnxruntime (>=1.23.2,<2.0.0)",
+    "vectifyai (>=0.2.1,<0.3.0)",
+    "transformers (>=4.57.3,<5.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
