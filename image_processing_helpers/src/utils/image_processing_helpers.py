@@ -11,6 +11,7 @@ These functions are designed to be shared with colleagues who are new to the cod
 """
 
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
 import numpy as np
@@ -48,6 +49,51 @@ except ImportError:
 _yolo_model_cache = {}
 _sam3_segmenter_cache = None
 _dinov2_extractor_cache = None
+
+
+def apply_exif_orientation(image: Image.Image) -> Image.Image:
+    """
+    Apply EXIF orientation to image if present.
+    This fixes rotation issues when images have EXIF orientation data.
+    
+    Args:
+        image: PIL Image object
+    
+    Returns:
+        PIL Image with correct orientation
+    """
+    try:
+        # Check if image has EXIF data
+        if hasattr(image, '_getexif') and image._getexif() is not None:
+            exif = image._getexif()
+            orientation = exif.get(274)  # EXIF orientation tag
+            
+            if orientation == 3:
+                image = image.rotate(180, expand=True)
+            elif orientation == 6:
+                image = image.rotate(270, expand=True)  # Rotate 270 = -90 (clockwise)
+            elif orientation == 8:
+                image = image.rotate(90, expand=True)  # Rotate 90 = -270 (counterclockwise)
+        elif hasattr(image, 'getexif'):
+            # For newer PIL versions
+            try:
+                exif = image.getexif()
+                if exif is not None:
+                    orientation = exif.get(274)  # EXIF orientation tag
+                    
+                    if orientation == 3:
+                        image = image.rotate(180, expand=True)
+                    elif orientation == 6:
+                        image = image.rotate(270, expand=True)  # Rotate 270 = -90 (clockwise)
+                    elif orientation == 8:
+                        image = image.rotate(90, expand=True)  # Rotate 90 = -270 (counterclockwise)
+            except Exception:
+                pass
+    except Exception:
+        # If EXIF handling fails, return image as-is
+        pass
+    
+    return image
 
 
 def remove_background_with_sam3(
@@ -246,188 +292,188 @@ def remove_background_with_sam3(
         }
 
 
-def remove_background_with_snapiq(
-    image: Union[Image.Image, str, Path],
-    yolo_model_path: str = "models/yolo_22brands_best.pt",
-    snapiq_model_path: Optional[str] = None,
-    yolo_confidence: float = 0.25,
-    device: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Remove background from an image using YOLO detection + SnapIQ local model.
+# def remove_background_with_snapiq(
+#     image: Union[Image.Image, str, Path],
+#     yolo_model_path: str = "models/yolo_22brands_best.pt",
+#     snapiq_model_path: Optional[str] = None,
+#     yolo_confidence: float = 0.25,
+#     device: Optional[str] = None
+# ) -> Dict[str, Any]:
+#     """
+#     Remove background from an image using YOLO detection + SnapIQ local model.
     
-    This function:
-    1. Uses YOLO to detect components in the image
-    2. Crops to the detected bounding box
-    3. Uses SnapIQ local model (rembg) to remove background
-    4. Returns a transparent PNG
+#     This function:
+#     1. Uses YOLO to detect components in the image
+#     2. Crops to the detected bounding box
+#     3. Uses SnapIQ local model (rembg) to remove background
+#     4. Returns a transparent PNG
     
-    Args:
-        image: PIL Image object, or path to image file (str or Path)
-        yolo_model_path: Path to YOLO model file (.pt file). Default: "models/yolo_22brands_best.pt"
-        snapiq_model_path: Path to SnapIQ model file (optional, uses default rembg model if None)
-        yolo_confidence: Confidence threshold for YOLO detections (0.0-1.0)
-        device: Device to use ("cuda", "cpu", "mps"). If None, auto-detects.
+#     Args:
+#         image: PIL Image object, or path to image file (str or Path)
+#         yolo_model_path: Path to YOLO model file (.pt file). Default: "models/yolo_22brands_best.pt"
+#         snapiq_model_path: Path to SnapIQ model file (optional, uses default rembg model if None)
+#         yolo_confidence: Confidence threshold for YOLO detections (0.0-1.0)
+#         device: Device to use ("cuda", "cpu", "mps"). If None, auto-detects.
     
-    Returns:
-        Dictionary with:
-        - 'segmented_image': PIL Image with transparent background (RGBA)
-        - 'bbox': Bounding box [x1, y1, x2, y2] of the detected component
-        - 'class_name': YOLO class name (e.g., "logo", "hardware")
-        - 'confidence': YOLO detection confidence score
-        - 'error': Error message if something went wrong, None otherwise
+#     Returns:
+#         Dictionary with:
+#         - 'segmented_image': PIL Image with transparent background (RGBA)
+#         - 'bbox': Bounding box [x1, y1, x2, y2] of the detected component
+#         - 'class_name': YOLO class name (e.g., "logo", "hardware")
+#         - 'confidence': YOLO detection confidence score
+#         - 'error': Error message if something went wrong, None otherwise
     
-    Note:
-        Requires rembg library: pip install rembg
+#     Note:
+#         Requires rembg library: pip install rembg
     
-    Example:
-        >>> from PIL import Image
-        >>> result = remove_background_with_snapiq(
-        ...     image="path/to/image.jpg",
-        ...     snapiq_model_path="models/snapiq_model.onnx"  # Optional
-        ... )
-        >>> if result['error'] is None:
-        ...     result['segmented_image'].save("output.png")
-    """
-    # Try to import rembg (SnapIQ uses rembg library)
-    try:
-        from rembg import remove
-        REMBG_AVAILABLE = True
-    except ImportError:
-        REMBG_AVAILABLE = False
-        return {
-            'segmented_image': None,
-            'bbox': None,
-            'class_name': None,
-            'confidence': None,
-            'error': "rembg not available. Install with: pip install rembg"
-        }
+#     Example:
+#         >>> from PIL import Image
+#         >>> result = remove_background_with_snapiq(
+#         ...     image="path/to/image.jpg",
+#         ...     snapiq_model_path="models/snapiq_model.onnx"  # Optional
+#         ... )
+#         >>> if result['error'] is None:
+#         ...     result['segmented_image'].save("output.png")
+#     """
+#     # Try to import rembg (SnapIQ uses rembg library)
+#     try:
+#         from rembg import remove
+#         REMBG_AVAILABLE = True
+#     except ImportError:
+#         REMBG_AVAILABLE = False
+#         return {
+#             'segmented_image': None,
+#             'bbox': None,
+#             'class_name': None,
+#             'confidence': None,
+#             'error': "rembg not available. Install with: pip install rembg"
+#         }
     
-    # Initialize device
-    if device is None:
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
+#     # Initialize device
+#     if device is None:
+#         if torch.cuda.is_available():
+#             device = "cuda"
+#         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+#             device = "mps"
+#         else:
+#             device = "cpu"
     
-    # Load image
-    if isinstance(image, (str, Path)):
-        image_path = Path(image)
-        if not image_path.exists():
-            return {
-                'segmented_image': None,
-                'bbox': None,
-                'class_name': None,
-                'confidence': None,
-                'error': f"Image file not found: {image_path}"
-            }
-        image = Image.open(image_path).convert('RGB')
-    elif not isinstance(image, Image.Image):
-        return {
-            'segmented_image': None,
-            'bbox': None,
-            'class_name': None,
-            'confidence': None,
-            'error': f"Invalid image type: {type(image)}. Expected PIL Image, str, or Path."
-        }
+#     # Load image
+#     if isinstance(image, (str, Path)):
+#         image_path = Path(image)
+#         if not image_path.exists():
+#             return {
+#                 'segmented_image': None,
+#                 'bbox': None,
+#                 'class_name': None,
+#                 'confidence': None,
+#                 'error': f"Image file not found: {image_path}"
+#             }
+#         image = Image.open(image_path).convert('RGB')
+#     elif not isinstance(image, Image.Image):
+#         return {
+#             'segmented_image': None,
+#             'bbox': None,
+#             'class_name': None,
+#             'confidence': None,
+#             'error': f"Invalid image type: {type(image)}. Expected PIL Image, str, or Path."
+#         }
     
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
+#     if image.mode != 'RGB':
+#         image = image.convert('RGB')
     
-    # Check YOLO availability
-    if not YOLO_AVAILABLE:
-        return {
-            'segmented_image': None,
-            'bbox': None,
-            'class_name': None,
-            'confidence': None,
-            'error': "YOLO not available. Install with: pip install ultralytics"
-        }
+#     # Check YOLO availability
+#     if not YOLO_AVAILABLE:
+#         return {
+#             'segmented_image': None,
+#             'bbox': None,
+#             'class_name': None,
+#             'confidence': None,
+#             'error': "YOLO not available. Install with: pip install ultralytics"
+#         }
     
-    # Load YOLO model
-    yolo_key = (yolo_model_path, device)
-    if yolo_key not in _yolo_model_cache:
-        if not Path(yolo_model_path).exists():
-            return {
-                'segmented_image': None,
-                'bbox': None,
-                'class_name': None,
-                'confidence': None,
-                'error': f"YOLO model not found: {yolo_model_path}"
-            }
-        _yolo_model_cache[yolo_key] = YOLO(yolo_model_path)
-        _yolo_model_cache[yolo_key].to(device)
+#     # Load YOLO model
+#     yolo_key = (yolo_model_path, device)
+#     if yolo_key not in _yolo_model_cache:
+#         if not Path(yolo_model_path).exists():
+#             return {
+#                 'segmented_image': None,
+#                 'bbox': None,
+#                 'class_name': None,
+#                 'confidence': None,
+#                 'error': f"YOLO model not found: {yolo_model_path}"
+#             }
+#         _yolo_model_cache[yolo_key] = YOLO(yolo_model_path)
+#         _yolo_model_cache[yolo_key].to(device)
     
-    yolo_model = _yolo_model_cache[yolo_key]
+#     yolo_model = _yolo_model_cache[yolo_key]
     
-    # Run YOLO detection
-    try:
-        img_array = np.array(image)
-        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        results = yolo_model(img_bgr, conf=yolo_confidence, verbose=False)
+#     # Run YOLO detection
+#     try:
+#         img_array = np.array(image)
+#         img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+#         results = yolo_model(img_bgr, conf=yolo_confidence, verbose=False)
         
-        if not results or len(results[0].boxes) == 0:
-            return {
-                'segmented_image': None,
-                'bbox': None,
-                'class_name': None,
-                'confidence': None,
-                'error': "No components detected by YOLO. Try lowering yolo_confidence."
-            }
+#         if not results or len(results[0].boxes) == 0:
+#             return {
+#                 'segmented_image': None,
+#                 'bbox': None,
+#                 'class_name': None,
+#                 'confidence': None,
+#                 'error': "No components detected by YOLO. Try lowering yolo_confidence."
+#             }
         
-        # Get best detection
-        boxes = results[0].boxes
-        best_box = boxes[0]
-        bbox = best_box.xyxy[0].cpu().numpy()
-        conf = float(best_box.conf[0].cpu().numpy())
-        cls_id = int(best_box.cls[0].cpu().numpy())
-        class_name = yolo_model.names[cls_id]
+#         # Get best detection
+#         boxes = results[0].boxes
+#         best_box = boxes[0]
+#         bbox = best_box.xyxy[0].cpu().numpy()
+#         conf = float(best_box.conf[0].cpu().numpy())
+#         cls_id = int(best_box.cls[0].cpu().numpy())
+#         class_name = yolo_model.names[cls_id]
         
-        # Crop image to bounding box
-        x1, y1, x2, y2 = map(int, bbox)
-        cropped_image = image.crop((x1, y1, x2, y2))
+#         # Crop image to bounding box
+#         x1, y1, x2, y2 = map(int, bbox)
+#         cropped_image = image.crop((x1, y1, x2, y2))
         
-        # Use rembg to remove background
-        # Convert PIL to bytes for rembg
-        from io import BytesIO
-        img_buffer = BytesIO()
-        cropped_image.save(img_buffer, format='PNG')
-        img_bytes = img_buffer.getvalue()
+#         # Use rembg to remove background
+#         # Convert PIL to bytes for rembg
+#         from io import BytesIO
+#         img_buffer = BytesIO()
+#         cropped_image.save(img_buffer, format='PNG')
+#         img_bytes = img_buffer.getvalue()
         
-        # Remove background using rembg
-        # If custom model path provided, use it; otherwise use default
-        if snapiq_model_path and Path(snapiq_model_path).exists():
-            # Use custom model (if rembg supports it)
-            output_bytes = remove(img_bytes, model_name=snapiq_model_path)
-        else:
-            # Use default rembg model
-            output_bytes = remove(img_bytes)
+#         # Remove background using rembg
+#         # If custom model path provided, use it; otherwise use default
+#         if snapiq_model_path and Path(snapiq_model_path).exists():
+#             # Use custom model (if rembg supports it)
+#             output_bytes = remove(img_bytes, model_name=snapiq_model_path)
+#         else:
+#             # Use default rembg model
+#             output_bytes = remove(img_bytes)
         
-        # Convert result back to PIL Image
-        result_image = Image.open(BytesIO(output_bytes))
+#         # Convert result back to PIL Image
+#         result_image = Image.open(BytesIO(output_bytes))
         
-        # Ensure RGBA format
-        if result_image.mode != 'RGBA':
-            result_image = result_image.convert('RGBA')
+#         # Ensure RGBA format
+#         if result_image.mode != 'RGBA':
+#             result_image = result_image.convert('RGBA')
         
-        return {
-            'segmented_image': result_image,
-            'bbox': bbox.tolist(),
-            'class_name': class_name,
-            'confidence': conf,
-            'error': None
-        }
+#         return {
+#             'segmented_image': result_image,
+#             'bbox': bbox.tolist(),
+#             'class_name': class_name,
+#             'confidence': conf,
+#             'error': None
+#         }
     
-    except Exception as e:
-        return {
-            'segmented_image': None,
-            'bbox': None,
-            'class_name': None,
-            'confidence': None,
-            'error': f"Error processing with SnapIQ: {str(e)}"
-        }
+#     except Exception as e:
+#         return {
+#             'segmented_image': None,
+#             'bbox': None,
+#             'class_name': None,
+#             'confidence': None,
+#             'error': f"Error processing with SnapIQ: {str(e)}"
+#         }
 
 
 def get_dinov2_embedding(
@@ -505,7 +551,7 @@ def get_dinov2_embedding(
     
     try:
         from .embed_extractor import EmbeddingExtractor
-
+        
         if _dinov2_extractor_cache is None:
             print(f"📦 Loading DINOv2 model: {model_name}")
             _dinov2_extractor_cache = EmbeddingExtractor(
@@ -557,6 +603,241 @@ def get_dinov2_embedding(
         import traceback
         traceback.print_exc()
         return None
+
+
+def remove_background_with_snapiq(
+    image: Union[Image.Image, str, Path],
+    yolo_model_path: str = "models/yolo_22brands_best.pt",
+    snapiq_model_path: Optional[str] = None,
+    yolo_confidence: float = 0.25,
+    device: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Remove background from an image using YOLO detection + SnapIQ local model.
+    
+    This function:
+    1. Uses YOLO to detect components in the image
+    2. Crops to the detected bounding box
+    3. Uses SnapIQ local model (rembg) to remove background
+    4. Replaces the background with white color
+    
+    Args:
+        image: PIL Image object, or path to image file (str or Path)
+        yolo_model_path: Path to YOLO model file (.pt file). Default: "models/yolo_22brands_best.pt"
+        snapiq_model_path: Path to SnapIQ model file (optional, uses default rembg model if None)
+        yolo_confidence: Confidence threshold for YOLO detections (0.0-1.0)
+        device: Device to use ("cuda", "cpu", "mps"). If None, auto-detects.
+    
+    Returns:
+        Dictionary with:
+        - 'segmented_image': PIL Image with white background (RGB)
+        - 'bbox': Bounding box [x1, y1, x2, y2] of the detected component
+        - 'class_name': YOLO class name (e.g., "logo", "hardware")
+        - 'confidence': YOLO detection confidence score
+        - 'error': Error message if something went wrong, None otherwise
+    
+    Note:
+        Requires rembg library: pip install rembg
+    
+    Example:
+        >>> from PIL import Image
+        >>> result = remove_background_with_snapiq(
+        ...     image="path/to/image.jpg",
+        ...     snapiq_model_path="models/snapiq_model.onnx"  # Optional
+        ... )
+        >>> if result['error'] is None:
+        ...     result['segmented_image'].save("output.png")
+    """
+    # Try to import rembg (SnapIQ uses rembg library)
+    try:
+        from rembg import remove
+        REMBG_AVAILABLE = True
+    except ImportError:
+        REMBG_AVAILABLE = False
+        return {
+            'segmented_image': None,
+            'bbox': None,
+            'class_name': None,
+            'confidence': None,
+            'error': "rembg not available. Install with: pip install rembg"
+        }
+    
+    # Initialize device
+    if device is None:
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+    
+    # Load image
+    if isinstance(image, (str, Path)):
+        image_path = Path(image)
+        if not image_path.exists():
+            return {
+                'segmented_image': None,
+                'bbox': None,
+                'class_name': None,
+                'confidence': None,
+                'error': f"Image file not found: {image_path}"
+            }
+        image = Image.open(image_path)
+        # Apply EXIF orientation to fix rotation issues
+        image = apply_exif_orientation(image)
+        image = image.convert('RGB')
+    elif not isinstance(image, Image.Image):
+        return {
+            'segmented_image': None,
+            'bbox': None,
+            'class_name': None,
+            'confidence': None,
+            'error': f"Invalid image type: {type(image)}. Expected PIL Image, str, or Path."
+        }
+    else:
+        # Apply EXIF orientation if image is already a PIL Image
+        image = apply_exif_orientation(image)
+    
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    # Check YOLO availability
+    if not YOLO_AVAILABLE:
+        return {
+            'segmented_image': None,
+            'bbox': None,
+            'class_name': None,
+            'confidence': None,
+            'error': "YOLO not available. Install with: pip install ultralytics"
+        }
+    
+    # Load YOLO model
+    yolo_key = (yolo_model_path, device)
+    if yolo_key not in _yolo_model_cache:
+        if not Path(yolo_model_path).exists():
+            return {
+                'segmented_image': None,
+                'bbox': None,
+                'class_name': None,
+                'confidence': None,
+                'error': f"YOLO model not found: {yolo_model_path}"
+            }
+        _yolo_model_cache[yolo_key] = YOLO(yolo_model_path)
+        _yolo_model_cache[yolo_key].to(device)
+    
+    yolo_model = _yolo_model_cache[yolo_key]
+    
+    # Initialize timing variables
+    start_time = time.time()
+    yolo_time = 0
+    rembg_time = 0
+    bg_time = 0
+    
+    # Run YOLO detection
+    try:
+        yolo_start = time.time()
+        img_array = np.array(image)
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        results = yolo_model(img_bgr, conf=yolo_confidence, verbose=False)
+        yolo_time = time.time() - yolo_start
+        
+        if not results or len(results[0].boxes) == 0:
+            return {
+                'segmented_image': None,
+                'bbox': None,
+                'class_name': None,
+                'confidence': None,
+                'error': "No components detected by YOLO. Try lowering yolo_confidence."
+            }
+        
+        # Get best detection
+        boxes = results[0].boxes
+        best_box = boxes[0]
+        bbox = best_box.xyxy[0].cpu().numpy()
+        conf = float(best_box.conf[0].cpu().numpy())
+        cls_id = int(best_box.cls[0].cpu().numpy())
+        class_name = yolo_model.names[cls_id]
+        
+        # Crop image to bounding box
+        x1, y1, x2, y2 = map(int, bbox)
+        cropped_image = image.crop((x1, y1, x2, y2))
+        
+        # Use rembg to remove background
+        # Convert PIL to bytes for rembg
+        from io import BytesIO
+        img_buffer = BytesIO()
+        cropped_image.save(img_buffer, format='PNG')
+        img_bytes = img_buffer.getvalue()
+        
+        # Remove background using rembg
+        rembg_start = time.time()
+        # If custom model path provided, use it; otherwise use default
+        if snapiq_model_path and Path(snapiq_model_path).exists():
+            # Use custom model (if rembg supports it)
+            output_bytes = remove(img_bytes, model_name=snapiq_model_path)
+        else:
+            # Use default rembg model
+            output_bytes = remove(img_bytes)
+        rembg_time = time.time() - rembg_start
+        
+        # Convert result back to PIL Image
+        result_image = Image.open(BytesIO(output_bytes))
+        
+        # Ensure RGBA format
+        if result_image.mode != 'RGBA':
+            result_image = result_image.convert('RGBA')
+        
+        # Create white background instead of transparent
+        bg_start = time.time()
+        white_background = Image.new('RGB', result_image.size, (255, 255, 255))
+        
+        # Composite the foreground (with alpha channel) onto white background
+        if result_image.mode == 'RGBA':
+            # Paste the image onto white background using alpha channel as mask
+            white_background.paste(result_image, mask=result_image.split()[3])  # Use alpha channel as mask
+            result_image = white_background
+        else:
+            result_image = result_image.convert('RGB')
+        bg_time = time.time() - bg_start
+        
+        # Fix rotation: Rotate 90 degrees clockwise to counter anticlockwise rotation
+        # This fixes the issue where rembg output is rotated anticlockwise by 90 degrees
+        # result_image = result_image.rotate(-90, expand=True)  # -90 = 90 degrees clockwise
+        
+        # Calculate total time
+        total_time = time.time() - start_time
+        
+        # Print timing information
+        print(f"\n⏱️  Segmentation Speed Metrics:")
+        print(f"   - YOLO Detection: {yolo_time:.3f}s")
+        print(f"   - Background Removal (rembg): {rembg_time:.3f}s")
+        print(f"   - White Background Composition: {bg_time:.3f}s")
+        print(f"   - Total Time: {total_time:.3f}s")
+        
+        return {
+            'segmented_image': result_image,
+            'bbox': bbox.tolist(),
+            'class_name': class_name,
+            'confidence': conf,
+            'error': None,
+            'timing': {
+                'yolo_detection': yolo_time,
+                'background_removal': rembg_time,
+                'background_composition': bg_time,
+                'total_time': total_time
+            }
+        }
+    
+    except Exception as e:
+        return {
+            'segmented_image': None,
+            'bbox': None,
+            'class_name': None,
+            'confidence': None,
+            'error': f"Error processing with SnapIQ: {str(e)}"
+        }
+
+
 
 
 # Example usage

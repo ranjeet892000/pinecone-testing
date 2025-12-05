@@ -1,0 +1,118 @@
+{
+  "parent_session_id": "005aebd9-c260-487b-99de-63eab6aae207",
+  "unique_ids_with_scores": [
+    {
+      "id": "005aebd9-c260-487b-99de-63eab6aae207.macro.inner_logo.0",
+      "score": 0.999646962
+    },
+    {
+      "id": "66a16f9a-a0e0-469a-8d1e-1c7e322eda9f.macro.inner_logo.0",
+      "score": 0.796181083
+    },
+    {
+      "id": "751a9478-a6b5-446a-8a50-0358393abe07.macro.inner_logo.0",
+      "score": 0.727923274
+    },
+    {
+      "id": "2f765066-54f4-49b7-8e40-704b693dda0c.macro.inner_logo.0",
+      "score": 0.776974261
+    },
+    {
+      "id": "be3e9a9c-7066-4df4-8c3f-89aab18e71e6.macro.inner_logo.0",
+      "score": 0.72228694
+    },
+    {
+      "id": "41c36dc3-1cea-4f24-b178-5b8de9ee9773.macro.inner_logo.0",
+      "score": 0.809552372
+    },
+    {
+      "id": "4dccd080-2ab0-42fc-b14f-eab7e8d5fc17.macro.inner_logo.0",
+      "score": 0.765374959
+    },
+    {
+      "id": "c076500a-da13-479d-9c3e-5964a4c3c91a.macro.inner_logo.0",
+      "score": 0.837463856
+    },
+    {
+      "id": "de71c705-d7f5-49b7-9551-460edec5e518.macro.inner_logo.0",
+      "score": 0.813337803
+    },
+    {
+      "id": "1580c884-04e0-45dd-85fe-6c0a82daac78.macro.inner_logo.0",
+      "score": 0.810465
+    },
+    {
+      "id": "cd022e02-3abf-486d-a1c3-274d541b1d2f.macro.inner_logo.0",
+      "score": 0.825172663
+    },
+    {
+      "id": "7d1f98fb-9da4-4fd6-b593-d51637233ccd.macro.inner_logo.0",
+      "score": 0.826174796
+    },
+    {
+      "id": "96f77360-a1d4-442f-a48e-45b9aa401e11.macro.inner_logo.0",
+      "score": 0.740927935
+    },
+    {
+      "id": "70319cb9-944c-4a76-8808-99593c9ad4f5.macro.inner_logo.0",
+      "score": 0.808709204
+    },
+    {
+      "id": "a8f27f8d-a048-4158-8d6f-7d969935641f.macro.inner_logo.0",
+      "score": 0.838314652
+    },
+    {
+      "id": "86fe4461-08f1-4c3d-bebc-d1b851d1b696.macro.inner_logo.0",
+      "score": 0.752261341
+    },
+    {
+      "id": "41b6644c-7118-4fd8-9705-ac82f59ba825.macro.inner_logo.0",
+      "score": 0.739291489
+    },
+    {
+      "id": "1012255a-810b-466d-928d-c577c078378f.macro.inner_logo.0",
+      "score": 0.896567106
+    },
+    {
+      "id": "4ba4c677-8169-4b44-8de4-19a29acc6a9b.macro.inner_logo.0",
+      "score": 0.831687748
+    },
+    {
+      "id": "caebcdc2-b944-45d0-a920-74973ba3dbf3.macro.inner_logo.0",
+      "score": 0.729755521
+    },
+    {
+      "id": "db967a66-586a-40eb-bb0c-9fa82e9d4a25.macro.inner_logo.0",
+      "score": 0.812664211
+    },
+    {
+      "id": "c7f39781-82fa-446f-890f-271304d95e4d.macro.inner_logo.0",
+      "score": 0.736899853
+    },
+    {
+      "id": "ea2a23c2-d9fd-4d6c-924d-819e41c4d8fd.macro.inner_logo.0",
+      "score": 0.791144609
+    },
+    {
+      "id": "7ab17e19-47d1-495e-85c9-18a8a51db066.macro.inner_logo.0",
+      "score": 0.778953
+    },
+    {
+      "id": "30d00c60-c38a-4e61-8c2d-c9440b62b497.macro.inner_logo.0",
+      "score": 0.729454458
+    },
+    {
+      "id": "9cd4e4fb-7e55-4048-b976-b3e4e8450385.macro.inner_logo.0",
+      "score": 0.719986856
+    },
+    {
+      "id": "e2e26784-c594-44b0-bfba-6947a9431f89.macro.inner_logo.0",
+      "score": 0.849725664
+    },
+    {
+      "id": "118aa55c-3f76-4ccb-a733-a9d366775ff1.macro.inner_logo.0",
+      "score": 0.803946853
+    }
+  ],
+  "unique_count": 28
+}
