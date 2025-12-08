@@ -50,16 +50,16 @@ def closest_match_with_removing_background(pinecone_index, s3_client, id, s3_key
             
             if similar_images:
                 for i, match in enumerate(similar_images, 1):
-                    print(f"\n   {i}. ID: {match.id}")
-                    print(f"      - Score: {match.score:.4f}")
-                    if match.metadata:
-                        print(f"      - Metadata: {match.metadata}")
+                    # print(f"\n   {i}. ID: {match.id}")
+                    # print(f"      - Score: {match.score:.4f}")
+                    # if match.metadata:
+                    #     print(f"      - Metadata: {match.metadata}")
                     result_ids.append(match.id)
     
     return result_ids
 
 
-def closest_match_without_removing_background(pinecone_index, id, region_id=None, session_ids_filter=None):
+def closest_match_without_removing_background(pinecone_index, id, region_id=None, session_ids_filter=None,brand=None):
     """
     Find closest matches without background removal.
     Returns a list of dictionaries with 'id' and 'score' keys.
@@ -80,9 +80,12 @@ def closest_match_without_removing_background(pinecone_index, id, region_id=None
     filter_dict = {
         "function_id": "authentication",
         "region_id": region_id,
-        "brand_id": "louis_vuitton",
         "device_type": "camera"
     }
+    
+    # Add brand_id filter if provided
+    if brand:
+        filter_dict["brand_id"] = brand
     
     # Add session_uuid filter if provided
     if session_ids_filter:

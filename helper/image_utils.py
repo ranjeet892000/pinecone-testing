@@ -39,7 +39,7 @@ def download_image(s3_client, s3_key, local_path="downloaded_image.jpg"):
     """
     try:
         s3_client.download_file("entrupy-app-db", s3_key, local_path)
-        print("Downloaded!")
+        # print("Downloaded!")
         return local_path
     except Exception as e:
         print(f"❌ Error downloading image: {e}")
@@ -58,7 +58,7 @@ def remove_background(image_path, output_path="downloaded_image_no_bg.png", yolo
     Returns:
         Path to background-removed image, or None if error
     """
-    print(f"\n🔄 Removing background from {image_path} using SnapIQ...")
+    # print(f"\n🔄 Removing background from {image_path} using SnapIQ...")
     
     # Call the background removal function
     result = remove_background_with_snapiq(
@@ -72,10 +72,10 @@ def remove_background(image_path, output_path="downloaded_image_no_bg.png", yolo
     if result['error'] is None:
         # Save the background-removed image
         result['segmented_image'].save(output_path)
-        print(f"✅ Background removed successfully!")
-        print(f"   - Saved to: {output_path}")
-        print(f"   - Detected class: {result['class_name']}")
-        print(f"   - Confidence: {result['confidence']:.2f}")
+        # print(f"✅ Background removed successfully!")
+        # print(f"   - Saved to: {output_path}")
+        # print(f"   - Detected class: {result['class_name']}")
+        # print(f"   - Confidence: {result['confidence']:.2f}")
         return output_path
     else:
         print(f"❌ Error removing background: {result['error']}")
@@ -93,7 +93,7 @@ def create_embedding(image_path, model_name="facebook/dinov2-base"):
     Returns:
         Numpy array containing the embedding, or None if error
     """
-    print(f"\n🔄 Creating DINOv2 embedding for {image_path}...")
+    # print(f"\n🔄 Creating DINOv2 embedding for {image_path}...")
     
     embedding = get_dinov2_embedding(
         image=image_path,
@@ -102,9 +102,9 @@ def create_embedding(image_path, model_name="facebook/dinov2-base"):
     )
     
     if embedding is not None:
-        print(f"✅ Embedding created successfully!")
-        print(f"   - Embedding shape: {embedding.shape}")
-        print(f"   - Embedding dimension: {len(embedding)}")
+        # print(f"✅ Embedding created successfully!")
+        # print(f"   - Embedding shape: {embedding.shape}")
+        # print(f"   - Embedding dimension: {len(embedding)}")
         return embedding
     else:
         print(f"❌ Error creating embedding")
