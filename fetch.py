@@ -1,272 +1,168 @@
-
 import os
 import json
 import csv
+import sys
+import asyncio
 import unicodedata
-from pinecone import Pinecone
+from typing import Any, Dict, List, Optional, Set, Iterable
 from pathlib import Path
 
+from pinecone import PineconeAsyncio
 from dotenv import load_dotenv
+from pydantic import BaseModel
+import pandas as pd
+from tqdm import tqdm
+
+# Increase CSV field size limit to handle large fields (e.g., long session_ids lists)
+csv.field_size_limit(sys.maxsize)
+
 load_dotenv()
 
-# Import utility modules
-from helper.image_utils import initialize_s3_client
-from helper.background_utils import (
-    closest_match_with_removing_background,
-    closest_match_without_removing_background
-)
-from extract_metadata import process_jsonl_file
 
-# Initialize Pinecone
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index_name = "luxury-v2"
-pinecone_index = pc.Index(index_name)
+# ============================================================
+# RATE LIMITING
+# ============================================================
 
-# Initialize S3 client
-s3_client = initialize_s3_client()
+class TokenBucket:
+    def __init__(self, rate: float, capacity: int):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last = None  # Initialize lazily
+        self.lock = asyncio.Lock()
 
+    async def consume(self, amount=1):
+        async with self.lock:
+            loop = asyncio.get_event_loop()
+            now = loop.time()
 
+            if self.last is None:
+                self.last = now
 
-def extract_session_ids(id_list):
-    """
-    Extract session IDs from a list of IDs or ID dictionaries.
-    
-    Args:
-        id_list: List of IDs (strings) or dictionaries with 'id' key
-    
-    Returns:
-        List of unique session IDs (first part before the first dot)
-    """
-    ids = []
-    for item in id_list:
-        if isinstance(item, dict):
-            # New format: dictionary with 'id' key
-            id_str = item.get('id', '')
-        else:
-            # Old format: string
-            id_str = item
-        
-        if id_str and '.' in id_str:
-            session_id = id_str.split('.')[0]
-            ids.append(session_id)
-    
-    return ids[:5]
+            elapsed = now - self.last
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            self.last = now
+
+            if self.tokens < amount:
+                wait_time = (amount - self.tokens) / self.rate
+                await asyncio.sleep(wait_time)
+                self.tokens = 0
+            else:
+                self.tokens -= amount
 
 
-def process_100_rows():
-    """
-    Get 100 rows from metadata.jsonl (with region_id='camera') and call both 
-    closest_match_with_removing_background and closest_match_without_removing_background for each.
-    Returns a JSON structure mapping each row ID to arrays of result IDs from both methods.
-    """
-    print("📂 Loading 100 records from metadata.jsonl (region_id='camera')...")
-    records = process_jsonl_file('metadata.jsonl', max_records=100, region_id_filter='camera')
-    print(f"✅ Loaded {len(records)} records\n")
-    
-    results_dict = {}
-    
-    for idx, record in enumerate(records, 1):
-        print(f"Processing record {idx}/{len(records)}")
-        
-        # Construct ID from available data
-        # Format: {session_uuid}.macro.{region_id}.0
-        session_uuid = record.get('session_uuid', '')
-        region_id = record.get('region_id', '')
-        constructed_id = f"{session_uuid}.macro.camera.0"
-        
-        s3_key = record.get('s3_key')
-        brand_id = record.get('brand_id')
-        
-        if s3_key:
-            try:
-                # Call both functions
-                print(f"\n🔍 Running closest_match_with_removing_background...")
-                results_with_removing_bg = closest_match_with_removing_background(
-                    pinecone_index=pinecone_index,
-                    s3_client=s3_client,
-                    id=constructed_id,
-                    s3_key=s3_key,
-                    brand_id=brand_id
-                )
-                
-                print(f"\n🔍 Running closest_match_without_removing_background...")
-                results_without_removing_bg = closest_match_without_removing_background(
-                    pinecone_index=pinecone_index,
-                    id=constructed_id
-                )
-                
-                # Store results with separate sections for with_background and without_background
-                results_dict[constructed_id] = {
-                    "with_background": results_with_removing_bg,
-                    "without_background": results_without_removing_bg
-                }
-                
-                # print(f"\n✅ Record {idx} processed: {len(results_with_removing_bg)} results (with bg) + {len(results_without_removing_bg)} results (without bg)")
-                
-            except Exception as e:
-                print(f"❌ Error processing record {idx}: {e}")
-                # Store empty lists for failed records
-                results_dict[constructed_id] = {
-                    "with_background": [],
-                    "without_background": []
-                }
-                continue
-        else:
-            print(f"⚠️  Skipping record {idx}: No s3_key found")
-            results_dict[constructed_id] = {
-                "with_background": [],
-                "without_background": []
-            }
-    
-    print(f"\n✅ Finished processing {len(records)} records")
-    
-    
-    # Also save to file
-    output_file = "results.json"
-    with open(output_file, 'w') as f:
-        json.dump(results_dict, f, indent=2)
-    print(f"\n💾 Results saved to {output_file}")
-    
-    return results_dict
-
-# Global list to collect all IDs
-all_collected_ids = []
-
-# Cache for query results to avoid redundant Pinecone queries
-_query_cache = {}
+global_bucket = TokenBucket(rate=50, capacity=50)
 
 
-def _get_cached_query(cache_key):
-    """Get cached query result if available."""
-    return _query_cache.get(cache_key)
+# ============================================================
+# CONFIG MODELS
+# ============================================================
+
+class StaticPineconeConfig(BaseModel):
+    index_name: str = "uniform-style"
+    top_k: int = 10
+    score_threshold: float = 0.7
+    max_depth: int = 15
+    output_file: str = "Saint_Laurent_result_cluster.json"
+    use_cache: bool = True
+    max_retries: int = 5
+    backoff_base: float = 0.5
+    max_results_per_session: int = 70
 
 
-def _set_cached_query(cache_key, result):
+class SimilarityClusterConfig(BaseModel):
+    function_id: str = "authentication"
+    brand_id: Optional[str] = None
+    device_type: str = "camera"
+    level_1_region_id: str = "macro.camera.0"
+    level_2_region_id: str = "macro.inner_logo.0"
+    pinecone: StaticPineconeConfig = StaticPineconeConfig()
+
+
+# ============================================================
+# CACHING
+# ============================================================
+
+_query_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def _set_cached_query(cache_key: str, result: List[Dict[str, Any]]) -> None:
     """Store query result in cache."""
     _query_cache[cache_key] = result
 
 
-def process_recursively(parent_session_id, visited=None, depth=0, max_depth=3, use_cache=True, brand=None):
+# ============================================================
+# ASYNC QUERY WITH RETRIES + RATE LIMITS
+# ============================================================
+
+async def query_with_retry(index, params, cfg: StaticPineconeConfig):
+    retries = 0
+
+    while True:
+        await global_bucket.consume(1)
+
+        try:
+            return await index.query(**params)
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "Too Many Requests" in msg:
+                wait = cfg.backoff_base * (2 ** retries)
+                await asyncio.sleep(wait)
+                retries += 1
+                if retries > cfg.max_retries:
+                    return None
+            else:
+                return None
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def build_filter(function_id: str, brand_id: Optional[str], device_type: str, region_id: Optional[str] = None, session_filter: Optional[Iterable[str]] = None):
+    f = {
+        "function_id": function_id,
+        "device_type": device_type,
+    }
+    if brand_id:
+        f["brand_id"] = brand_id
+    if region_id:
+        f["region_id"] = region_id
+    if session_filter:
+        f["session_uuid"] = {"$in": list(session_filter)}
+    return f
+
+
+def extract_session(id_str: str) -> Optional[str]:
+    """Extract session ID from full ID string."""
+    return id_str.split(".", 1)[0] if "." in id_str else None
+
+
+def merge_two_levels(cam_results, inner_results):
     """
-    Recursively process a parent session ID:
-    1. Get camera results and extract session IDs
-    2. Get inner_logo results filtered by camera session IDs
-    3. Take top 3 inner_logo IDs, add to global list, and recurse for each
+    Merge camera results and inner logo results, including camera_score.
+    Similar to fetch_async.py's merge_two_levels function.
     
     Args:
-        parent_session_id: Parent session UUID (e.g., "005aebd9-c260-487b-99de-63eab6aae207")
-        visited: Set of visited session IDs to avoid cycles
-        depth: Current recursion depth
-        max_depth: Maximum recursion depth
+        cam_results: List of camera match results with 'id' and 'score'
+        inner_results: List of inner logo match results with 'id' and 'score'
+    
+    Returns:
+        List of merged results with 'id', 'camera_score', and 'inner_logo_score'
     """
-    global all_collected_ids
-    
-    if visited is None:
-        visited = set()
-    
-    # Avoid cycles and respect max depth
-    if parent_session_id in visited or depth > max_depth:
-        return
-    
-    visited.add(parent_session_id)
-    print(f"\n🔍 Processing (depth={depth}): {parent_session_id}")
-    
-    try:
-        # Step 1: Get camera results (with caching)
-        camera_id = f"{parent_session_id}.macro.camera.0"
-        cache_key_camera = f"camera_{camera_id}_{brand or 'default'}"
-        
-        if use_cache and cache_key_camera in _query_cache:
-            results_camera = _query_cache[cache_key_camera]
-        else:
-            results_camera = closest_match_without_removing_background(
-                pinecone_index=pinecone_index,
-                id=camera_id,
-                region_id="camera",
-                brand=brand
-            )
-            if use_cache:
-                _set_cached_query(cache_key_camera, results_camera)
-        
-        # Extract session IDs from camera results
-        session_ids_camera = extract_session_ids(results_camera)
-
-        # Step 2: Get inner_logo results (filtered by camera session IDs, with caching)
-        inner_logo_id = f"{parent_session_id}.macro.inner_logo.0"
-        # Create cache key that includes the filter to ensure correctness
-        filter_str = str(sorted(session_ids_camera)) if session_ids_camera else "none"
-        cache_key_inner_logo = f"inner_logo_{inner_logo_id}_{filter_str}_{brand or 'default'}"
-        
-        if use_cache and cache_key_inner_logo in _query_cache:
-            results_inner_logo = _query_cache[cache_key_inner_logo]
-        else:
-            results_inner_logo = closest_match_without_removing_background(
-                pinecone_index=pinecone_index,
-                id=inner_logo_id,
-                region_id="inner_logo",
-                session_ids_filter=session_ids_camera if session_ids_camera else None,
-                brand=brand
-            )
-            if use_cache:
-                _set_cached_query(cache_key_inner_logo, results_inner_logo)
-        
-        # Step 3: Take top 4 IDs and add to global list (with scores)
-        top_4_inner_logo = results_inner_logo[:4]
-        all_collected_ids.extend(top_4_inner_logo)
-        
-        # Step 4: Recursively process each of the top 4 IDs sequentially
-        for inner_logo_result in top_4_inner_logo:
-            # print(f"Processing inner logo result: {inner_logo_result}")
-            if inner_logo_result['id'].split('.')[0] == parent_session_id:
-                # print(f"Skipping inner logo result: {inner_logo_result} because it is the same as the parent session ID")
-                continue
-            # Extract ID from dictionary
-            inner_logo_id_full = inner_logo_result.get('id', '') if isinstance(inner_logo_result, dict) else inner_logo_result
-            child_session_id = inner_logo_id_full.split('.')[0] if inner_logo_id_full else ''
-            if child_session_id:
-                process_recursively(
-                    parent_session_id=child_session_id,
-                    visited=visited,
-                    depth=depth + 1,
-                    max_depth=max_depth,
-                    use_cache=use_cache,
-                    brand=brand
-                )
-        
-    except Exception as e:
-        print(f"❌ Error processing {parent_session_id}: {e}")
-        import traceback
-        traceback.print_exc()
+    cam_map = {extract_session(c["id"]): c["score"] for c in cam_results}
+    merged = []
+    for inner in inner_results:
+        sid = extract_session(inner["id"])
+        merged.append({
+            "id": inner["id"],
+            "camera_score": cam_map.get(sid),
+            "inner_logo_score": inner["score"]
+        })
+    return merged
 
 
-# def get_louis_vuitton_session_uuids(csv_file='all_products.csv'):
-#     """
-#     Read CSV file and extract unique Session UUIDs where Brand_x = "Louis Vuitton".
-    
-#     Args:
-#         csv_file: Path to the CSV file
-    
-#     Returns:
-#         List of unique Session UUIDs
-#     """
-#     session_uuids = set()
-    
-#     try:
-#         with open(csv_file, 'r', encoding='utf-8') as f:
-#             reader = csv.DictReader(f)
-#             for row in reader:
-#                 brand = row.get('Brand_x', '').strip()
-#                 session_uuid = row.get('Session UUID', '').strip()
-                
-#                 if brand == 'Louis Vuitton' and session_uuid:
-#                     session_uuids.add(session_uuid)
-        
-#         return list(session_uuids)
-#     except Exception as e:
-#         print(f"❌ Error reading CSV file: {e}")
-#         return []
-
-def normalize_brand_name(brand_name):
+def normalize_brand_name(brand_name: Optional[str]) -> str:
     """
     Normalize brand name by removing accents and special characters.
     For example, "Céline" becomes "Celine".
@@ -278,7 +174,7 @@ def normalize_brand_name(brand_name):
         Normalized brand name (e.g., "Celine", "Louis Vuitton")
     """
     if not brand_name:
-        return brand_name
+        return ""
     
     # Normalize Unicode characters (decompose accents)
     # NFD = Normalization Form Decomposed
@@ -294,7 +190,7 @@ def normalize_brand_name(brand_name):
     return normalized
 
 
-def normalize_brand_name_to_id(brand_name):
+def normalize_brand_name_to_id(brand_name: Optional[str]) -> str:
     """
     Convert brand name from CSV to brand_id format used in Pinecone.
     First normalizes the brand name (removes accents), then converts to ID format.
@@ -307,12 +203,16 @@ def normalize_brand_name_to_id(brand_name):
     """
     # First normalize the brand name (remove accents)
     normalized_name = normalize_brand_name(brand_name)
-    
+    if normalized_name.lower() == "saint laurent":
+        return "yves_saint_laurent"
     # Convert to lowercase and replace spaces with underscores
     return normalized_name.lower().replace(' ', '_')
 
 
-def get_all_brand_session_uuids(csv_file='all_products.csv', exclude_brands=None):
+def get_all_brand_session_uuids(
+    csv_file: str, 
+    exclude_brands: Optional[Set[str]] = None
+) -> List[Dict[str, str]]:
     """
     Read CSV file and extract Session UUIDs along with their brands.
     
@@ -357,38 +257,194 @@ def get_all_brand_session_uuids(csv_file='all_products.csv', exclude_brands=None
         
         return session_brand_pairs
     except Exception as e:
-        print(f"❌ Error reading CSV file: {e}")
         return []
 
-def process_all_products(csv_file='all_products.csv', max_depth=7, use_cache=True, output_file=None):
+
+# ============================================================
+# CORE MATCH PROCESSOR
+# ============================================================
+
+async def closest_match(
+    index,
+    id: str,
+    config: SimilarityClusterConfig,
+    region_id: Optional[str],
+    session_filter: Optional[Iterable[str]],
+    region_name: str,
+    top_k:int
+):
     """
-    Process all brands and their Session UUIDs from CSV file recursively.
-    Results are saved incrementally to prevent data loss.
+    Async function to find closest matches using Pinecone query.
+    Similar to fetch_async.py's closest_match function.
+    """
+    params = dict(
+        id=id,
+        top_k=top_k,
+        include_metadata=True,
+        filter=build_filter(
+            config.function_id,
+            config.brand_id,
+            config.device_type,
+            region_id,
+            session_filter
+        )
+    )
+
+    resp = await query_with_retry(index, params, config.pinecone)
+    if resp is None:
+        return []
+
+    return [
+        {"id": m.id, "score": m.score, "region": region_name}
+        for m in resp.matches
+        if m.score >= config.pinecone.score_threshold
+    ]
+
+
+# ============================================================
+# CORE RECURSIVE PROCESSOR
+# ============================================================
+
+async def process_recursively(
+    index,
+    parent_session_id: str,
+    config: SimilarityClusterConfig,
+    visited: Set[str],
+    depth: int,
+    all_collected_ids: List[Dict[str, Any]],
+    seen_ids: Set[str],
+):
+    """
+    Recursively process a parent session ID:
+    1. Get camera results and extract session IDs
+    2. Get inner_logo results filtered by camera session IDs
+    3. Take top 4 inner_logo IDs, add to global list, and recurse for each
     
     Args:
-        csv_file: Path to the CSV file
-        max_depth: Maximum recursion depth
-        use_cache: Whether to use query result caching (default: True)
-        output_file: Path to output JSON file (default: 'all_products_result_cluster.json')
+        index: Pinecone async index
+        parent_session_id: Parent session UUID
+        config: SimilarityClusterConfig
+        visited: Set of visited session IDs to avoid cycles
+        depth: Current recursion depth
+        all_collected_ids: List to collect all IDs and scores
+        seen_ids: Set of unique IDs already collected (to track limit)
+    """
+    if parent_session_id in visited or depth > config.pinecone.max_depth:
+        return []
+    
+    # Check if we've reached the maximum results limit
+    if len(seen_ids) >= config.pinecone.max_results_per_session:
+        return []
+
+    visited.add(parent_session_id)
+    
+    collected = []
+
+    try:
+        # LEVEL 1: CAMERA REGION
+        camera_id = f"{parent_session_id}.{config.level_1_region_id}"
+        cache_key_camera = f"camera_{camera_id}_{config.brand_id or 'default'}"
+        
+        if config.pinecone.use_cache and cache_key_camera in _query_cache:
+            results_camera = _query_cache[cache_key_camera]
+        else:
+            results_camera = await closest_match(
+                index=index,
+                id=camera_id,
+                config=config,
+                region_id=config.level_1_region_id.split(".")[1],
+                session_filter=None,
+                region_name="camera",
+                top_k=config.pinecone.top_k,
+            )
+            if config.pinecone.use_cache:
+                _set_cached_query(cache_key_camera, results_camera)
+
+        allowed = [extract_session(c["id"]) for c in results_camera if extract_session(c["id"])]
+
+        # LEVEL 2: INNER REGION
+        inner_id = f"{parent_session_id}.{config.level_2_region_id}"
+        filter_str = str(sorted(allowed)) if allowed else "none"
+        cache_key_inner_logo = f"inner_logo_{inner_id}_{filter_str}_{config.brand_id or 'default'}"
+        
+        if config.pinecone.use_cache and cache_key_inner_logo in _query_cache:
+            results_inner_logo = _query_cache[cache_key_inner_logo]
+        else:
+            results_inner_logo = await closest_match(
+                index=index,
+                id=inner_id,
+                config=config,
+                region_id=config.level_2_region_id.split(".")[1],
+                session_filter=allowed,
+                region_name="inner_logo",
+                top_k=4,
+                )
+            if config.pinecone.use_cache:
+                _set_cached_query(cache_key_inner_logo, results_inner_logo)
+
+        inner_above = [i for i in results_inner_logo if i["score"] >= config.pinecone.score_threshold]
+        top_4_inner_logo = inner_above[:4]
+        
+        # Merge camera and inner_logo results to include camera_score
+        merged_results = merge_two_levels(results_camera, top_4_inner_logo)
+        
+        # Add to collected list, but only up to the limit
+        remaining_slots = config.pinecone.max_results_per_session - len(seen_ids)
+        if remaining_slots > 0:
+            for item in merged_results:
+                item_id = item.get('id', '')
+                if item_id and item_id not in seen_ids:
+                    if len(seen_ids) >= config.pinecone.max_results_per_session:
+                        break
+                    seen_ids.add(item_id)
+                    collected.append(item)
+                    all_collected_ids.append(item)
+        else:
+            pass
+
+        # RECURSE INTO CHILD SESSIONS (only if we haven't reached the limit)
+        tasks = []
+        if len(seen_ids) < config.pinecone.max_results_per_session:
+            for r in top_4_inner_logo:
+                child = extract_session(r["id"])
+                if child and child != parent_session_id:
+                    tasks.append(
+                        process_recursively(index, child, config, visited, depth + 1, all_collected_ids, seen_ids)
+                    )
+
+        if tasks:
+            nested = await asyncio.gather(*tasks)
+            for item in nested:
+                collected.extend(item)
+
+    except Exception as e:
+        pass
+
+    return collected
+
+
+# ============================================================
+# FILE I/O
+# ============================================================
+
+def load_existing_results(output_file: str) -> tuple[Dict[str, Any], Set[str]]:
+    """
+    Load existing results from output file if it exists.
+    
+    Args:
+        output_file: Path to the output JSON file
     
     Returns:
-        Dictionary mapping brands to their results
+        Tuple of (output_data dict, set of already processed UUIDs)
     """
-    global all_collected_ids, _query_cache
-    
-    if output_file is None:
-        output_file = "all_products_result_cluster_2.json"
-    
-    # Initialize output file structure
     output_data = {
         "brands": {},
         "total_brands_processed": 0,
         "total_session_uuids_processed": 0
     }
     
-    # Try to load existing results if file exists (for resuming)
     already_processed_uuids = set()
-    already_processed_brands = set()
+    
     try:
         if os.path.exists(output_file):
             with open(output_file, 'r') as f:
@@ -396,27 +452,16 @@ def process_all_products(csv_file='all_products.csv', max_depth=7, use_cache=Tru
                 if isinstance(existing_data, dict):
                     if "brands" in existing_data:
                         output_data["brands"] = existing_data.get("brands", {})
-                        # Collect all already processed session UUIDs and brands
-                        # Normalize brand names for comparison
+                        # Collect all already processed session UUIDs
                         for brand_name, brand_data in output_data["brands"].items():
                             if "results" in brand_data:
                                 brand_uuids = set(brand_data["results"].keys())
                                 already_processed_uuids.update(brand_uuids)
-                            # Normalize brand name for comparison
-                            normalized_brand = normalize_brand_name(brand_name)
-                            already_processed_brands.add(normalized_brand)
                         output_data["total_brands_processed"] = len(output_data["brands"])
                         output_data["total_session_uuids_processed"] = len(already_processed_uuids)
-                        # print(f"📂 Loaded existing results from {output_file}")
-                        # print(f"   - {len(output_data['brands'])} brands already processed")
-                        # print(f"   - {len(already_processed_uuids)} session UUIDs already processed")
-                        if already_processed_brands:
-                            print(f"   - Fully processed brands (will skip): {', '.join(sorted(already_processed_brands))}")
-                        print(f"   Will skip already processed brands and session UUIDs\n")
                     elif "results" in existing_data:
                         # Legacy format: single brand
                         legacy_brand_raw = existing_data.get("brand", "Louis Vuitton")
-                        # Normalize legacy brand name
                         legacy_brand = normalize_brand_name(legacy_brand_raw)
                         legacy_uuids = set(existing_data.get("results", {}).keys())
                         already_processed_uuids.update(legacy_uuids)
@@ -425,171 +470,242 @@ def process_all_products(csv_file='all_products.csv', max_depth=7, use_cache=Tru
                             "results": existing_data.get("results", {}),
                             "total_session_uuids_processed": len(legacy_uuids)
                         }
-                        already_processed_brands.add(legacy_brand)
                         output_data["total_brands_processed"] = 1
                         output_data["total_session_uuids_processed"] = len(legacy_uuids)
-                        # print(f"📂 Loaded legacy format results from {output_file}")
-                        # print(f"   - {legacy_brand}: {len(legacy_uuids)} session UUIDs")
-                        # print(f"   Will skip already processed brands and session UUIDs\n")
     except Exception as e:
-        print(f"⚠️  Could not load existing file: {e}")
-        print(f"   Starting fresh\n")
+        pass
     
-    # Get all Session UUIDs with their brands (excluding already processed brands)
-    print(f"📂 Reading CSV file: {csv_file}")
-    session_brand_pairs = get_all_brand_session_uuids(csv_file, exclude_brands=already_processed_brands)
+    return output_data, already_processed_uuids
+
+
+def save_results_atomic(output_data: Dict[str, Any], output_file: str) -> bool:
+    """
+    Save results to file using atomic write (temp file + rename).
+    
+    Args:
+        output_data: Data dictionary to save
+        output_file: Path to output file
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Write to temporary file first, then rename (atomic operation)
+        temp_file = output_file + ".tmp"
+        with open(temp_file, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        
+        # Atomic rename (works on Unix/Linux/Mac, Windows may need different approach)
+        if os.name == 'nt':  # Windows
+            if os.path.exists(output_file):
+                os.remove(output_file)
+            os.rename(temp_file, output_file)
+        else:  # Unix/Linux/Mac
+            os.replace(temp_file, output_file)
+        
+        return True
+    except Exception as e:
+        return False
+
+
+# ============================================================
+# MAIN PROCESSING FUNCTION
+# ============================================================
+
+async def process_one_session(
+    index,
+    session_uuid: str,
+    brand: str,
+    brand_id: str,
+    config: SimilarityClusterConfig,
+    best_match_style: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Process a single session UUID recursively.
+    
+    Args:
+        index: Pinecone async index
+        session_uuid: Session UUID to process
+        brand: Brand name (normalized)
+        brand_id: Brand ID for Pinecone filtering
+        config: SimilarityClusterConfig
+        best_match_style: Optional best match style from CSV
+    
+    Returns:
+        Dictionary with session results
+    """
+    visited = set()
+    all_collected_ids = []
+    seen_ids = set()  # Track unique IDs to enforce limit
+    
+    # Update config with brand_id
+    config.brand_id = brand_id
+    
+    items = await process_recursively(index, session_uuid, config, visited, 0, all_collected_ids, seen_ids)
+    
+    # Extract unique IDs (by 'id' key) while preserving scores
+    # Note: seen_ids already tracks uniqueness, so we can use all_collected_ids directly
+    # but we'll still deduplicate to be safe
+    unique_ids_with_scores = []
+    seen_in_final = set()
+    for item in all_collected_ids:
+        item_id = item.get('id', '') if isinstance(item, dict) else item
+        if item_id and item_id not in seen_in_final:
+            seen_in_final.add(item_id)
+            unique_ids_with_scores.append(item)
+    
+    result = {
+        "unique_ids_with_scores": unique_ids_with_scores,
+        "unique_count": len(unique_ids_with_scores),
+        "total_collected": len(all_collected_ids)
+    }
+    
+    # Add best_match_style if provided
+    if best_match_style:
+        result["best_match_style"] = best_match_style
+    
+    return result
+
+
+async def process_all_products(
+    csv_file: str,
+    cfg_static: StaticPineconeConfig,
+) -> Dict[str, Any]:
+    """
+    Process all brands and their Session UUIDs from CSV file recursively.
+    Results are saved incrementally to prevent data loss.
+    Similar to fetch_async.py - reads CSV directly with pandas.
+    
+    Args:
+        csv_file: Path to the CSV file
+        cfg_static: StaticPineconeConfig with all settings (max_depth, use_cache, output_file, etc.)
+    
+    Returns:
+        Dictionary mapping brands to their results
+    """
+    
+    # Load existing results
+    output_data, already_processed_uuids = load_existing_results(cfg_static.output_file)
+    
+    # Read CSV directly with pandas (like fetch_async.py)
+    try:
+        df = pd.read_csv(csv_file)
+    except Exception as e:
+        return {}
     
     # Filter out already processed session UUIDs
-    session_brand_pairs = [
-        pair for pair in session_brand_pairs 
-        if pair["session_uuid"] not in already_processed_uuids
-    ]
+    if 'Session UUID' in df.columns:
+        df = df[~df['Session UUID'].isin(already_processed_uuids)]
     
     # Group by brand for summary
     brand_counts = {}
-    for pair in session_brand_pairs:
-        brand = pair["brand"]
-        brand_counts[brand] = brand_counts.get(brand, 0) + 1
+    if 'Brand_x' in df.columns:
+        for brand_raw in df['Brand_x'].dropna().unique():
+            brand = normalize_brand_name(brand_raw)
+            count = len(df[df['Brand_x'] == brand_raw])
+            brand_counts[brand] = count
     
-    total_sessions = len(session_brand_pairs)
-    print(f"✅ Found {total_sessions} session UUIDs across {len(brand_counts)} brands to process")
-    for brand, count in brand_counts.items():
-        print(f"   - {brand}: {count} session UUIDs")
-    print(f"⚙️  Settings: cache={use_cache}, max_depth={max_depth}")
-    print(f"💾 Output file: {output_file}\n")
+    total_sessions = len(df)
     
-    # Process each session UUID with its brand
-    for idx, pair in enumerate(session_brand_pairs, 1):
-        session_uuid = pair['session_uuid']
-        brand = pair['brand']
-        brand_id = normalize_brand_name_to_id(brand)
+    # Initialize Pinecone async client
+    api_key = os.getenv("PINECONE_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing PINECONE_API_KEY")
+    
+    async with PineconeAsyncio(api_key=api_key) as pc:
+        # Get index metadata once
+        meta = await pc.describe_index(cfg_static.index_name)
+        host = meta.host
         
-        print(f"\n{'='*80}")
-        print(f"Processing Session UUID {idx}/{len(session_brand_pairs)}: {session_uuid} ({brand})")
-        print(f"{'='*80}")
+        # Create index connection once and reuse
+        index = pc.IndexAsyncio(host=host)
         
         try:
-            # Reset global list for each session UUID
-            all_collected_ids = []
-            
-            # Process recursively with caching and brand_id
-            process_recursively(
-                parent_session_id=session_uuid,
-                visited=set(),
-                depth=0,
-                max_depth=max_depth,
-                use_cache=use_cache,
-                brand=brand_id  # Pass normalized brand_id
-            )
-            
-            # Extract unique IDs (by 'id' key) while preserving scores
-            seen_ids = set()
-            unique_ids_with_scores = []
-            for item in all_collected_ids:
-                item_id = item.get('id', '') if isinstance(item, dict) else item
-                if item_id and item_id not in seen_ids:
-                    seen_ids.add(item_id)
-                    unique_ids_with_scores.append(item)
-            
-            # Store results for this session UUID
-            session_result = {
-                "unique_ids_with_scores": unique_ids_with_scores,
-                "unique_count": len(unique_ids_with_scores),
-                "total_collected": len(all_collected_ids)
-            }
-            
-            # Initialize brand data if not exists
-            if brand not in output_data["brands"]:
-                output_data["brands"][brand] = {
-                    "brand_id": brand_id,
-                    "results": {},
-                    "total_session_uuids_processed": 0
-                }
-            
-            # Update brand data
-            output_data["brands"][brand]["results"][session_uuid] = session_result
-            output_data["brands"][brand]["total_session_uuids_processed"] = len(output_data["brands"][brand]["results"])
-            output_data["total_brands_processed"] = len(output_data["brands"])
-            output_data["total_session_uuids_processed"] = sum(
-                b["total_session_uuids_processed"] for b in output_data["brands"].values()
-            )
-            
-            # Save incrementally to file
-            try:
-                # Write to temporary file first, then rename (atomic operation)
-                temp_file = output_file + ".tmp"
-                with open(temp_file, 'w') as f:
-                    json.dump(output_data, f, indent=2)
+            # Process each row directly (like fetch_async.py) with progress tracking
+            pbar = tqdm(total=len(df), desc="Processing sessions", unit="session")
+            for idx, (_, row) in enumerate(df.iterrows(), 1):
+                session_uuid = row.get('Session UUID', '').strip()
+                brand_raw = row.get('Brand_x', '').strip()
+                best_match_style = row.get('best_match_style', '').strip() if 'best_match_style' in row else None
                 
-                # Atomic rename (works on Unix/Linux/Mac, Windows may need different approach)
-                if os.name == 'nt':  # Windows
-                    if os.path.exists(output_file):
-                        os.remove(output_file)
-                    os.rename(temp_file, output_file)
-                else:  # Unix/Linux/Mac
-                    os.replace(temp_file, output_file)
+                if not session_uuid or not brand_raw:
+                    pbar.update(1)
+                    continue
                 
-                brand_count = output_data["brands"][brand]["total_session_uuids_processed"]
-                # print(f" Completed {session_uuid} ({brand}): {len(unique_ids_with_scores)} unique IDs collected")
-                print(f" Saved to {output_file} ({output_data['total_session_uuids_processed']}/{total_sessions + len(already_processed_uuids)} total session UUIDs, {brand}: {brand_count})")
-            except Exception as e:
-                print(f" Error saving to file: {e}")
-                print(f" Completed {session_uuid}: {len(unique_ids_with_scores)} unique IDs collected (not saved)")
+                # Normalize brand name
+                brand = normalize_brand_name(brand_raw)
+                brand_id = normalize_brand_name_to_id(brand)
+                
+                try:
+                    config = SimilarityClusterConfig(
+                        function_id="authentication",
+                        brand_id=brand_id,
+                        pinecone=cfg_static,
+                    )
+                    
+                    session_result = await process_one_session(
+                        index=index,
+                        session_uuid=session_uuid,
+                        brand=brand,
+                        brand_id=brand_id,
+                        config=config,
+                        best_match_style=best_match_style if best_match_style else None,
+                    )
+                    
+                    # Initialize brand data if not exists
+                    if brand not in output_data["brands"]:
+                        output_data["brands"][brand] = {
+                            "brand_id": brand_id,
+                            "results": {},
+                            "total_session_uuids_processed": 0
+                        }
+                    
+                    # Update brand data
+                    output_data["brands"][brand]["results"][session_uuid] = session_result
+                    output_data["brands"][brand]["total_session_uuids_processed"] = len(output_data["brands"][brand]["results"])
+                    output_data["total_brands_processed"] = len(output_data["brands"])
+                    output_data["total_session_uuids_processed"] = sum(
+                        b["total_session_uuids_processed"] for b in output_data["brands"].values()
+                    )
+                    
+                    # Save incrementally to file
+                    save_results_atomic(output_data, cfg_static.output_file)
+                    pbar.update(1)
+                
+                except Exception as e:
+                    # Save what we have so far even if this session failed
+                    output_data["total_brands_processed"] = len(output_data["brands"])
+                    output_data["total_session_uuids_processed"] = sum(
+                        b["total_session_uuids_processed"] for b in output_data["brands"].values()
+                    )
+                    save_results_atomic(output_data, cfg_static.output_file)
+                    pbar.update(1)
+                    continue
+            pbar.close()
         
-        except Exception as e:
-            print(f" Error processing {session_uuid}: {e}")
-            import traceback
-            traceback.print_exc()
-            # Save what we have so far even if this session failed
-            try:
-                output_data["total_brands_processed"] = len(output_data["brands"])
-                output_data["total_session_uuids_processed"] = sum(
-                    b["total_session_uuids_processed"] for b in output_data["brands"].values()
-                )
-                temp_file = output_file + ".tmp"
-                with open(temp_file, 'w') as f:
-                    json.dump(output_data, f, indent=2)
-                if os.name == 'nt':
-                    if os.path.exists(output_file):
-                        os.remove(output_file)
-                    os.rename(temp_file, output_file)
-                else:
-                    os.replace(temp_file, output_file)
-                print(f" Saved partial results to {output_file}")
-            except Exception as save_error:
-                print(f" Error saving partial results: {save_error}")
-            continue
+        finally:
+            # Explicitly close the index connection
+            await index.close()
     
     return output_data["brands"]
 
 
+# ============================================================
+# ENTRYPOINT
+# ============================================================
+
+def run_all():
+    """Main entry point that runs the async processing."""
+    # Create config once with desired settings (consistent with fetch_async.py pattern)
+    cfg_static = StaticPineconeConfig()
+    
+    results = asyncio.run(process_all_products(
+        csv_file='styles_sessions_brands_Saint_Laurent.csv',
+        cfg_static=cfg_static  # Pass the config object instead of individual parameters
+    ))
+    
+    return results
+
+
 if __name__ == '__main__':
-    # Process all products from CSV with caching (all brands dynamically)
-    # Results are saved incrementally to prevent data loss
-    print("Processing all products from CSV with caching (all brands)")
-    output_file = "all_products_result_cluster_2.json"
-    
-    results = process_all_products(
-        csv_file='all_products.csv',
-        max_depth=15,
-        use_cache=True,      # Enable caching for faster repeated queries
-        output_file=output_file  # Results saved incrementally
-    )
-    
-    # Final summary
-    print(f"\n{'='*80}")
-    print(f" Final Summary:")
-    print(f"{'='*80}")
-    print(f"   Total Brands processed: {len(results)}")
-    total_sessions = sum(b["total_session_uuids_processed"] for b in results.values())
-    print(f"   Total Session UUIDs processed: {total_sessions}")
-    total_unique_ids = sum(
-        sum(r['unique_count'] for r in brand_data["results"].values())
-        for brand_data in results.values()
-    )
-    print(f"   Total unique IDs across all sessions: {total_unique_ids}")
-    print(f"\n All results saved to {output_file}")
-    
-
-
-
+    run_all()
